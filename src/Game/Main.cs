@@ -1,277 +1,244 @@
-using GameTemplate.Core;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 using Godot;
-using Renegade.Ads;
-using Renegade.Audio;
+using Renegade.Cards;
 using Renegade.Core;
-using Renegade.Dev;
-using Renegade.Looks;
 using Renegade.Play;
 using Renegade.Ui;
+using Spades.Core;
 
-namespace GameTemplate.Game;
+namespace Spades.Game;
 
 /// <summary>
-/// Starting point for a new game, built the way every Renegade game is: the shared stage (lights,
-/// reflection sky, table), a board on a rig that spins with a drag, the shared HUD (modes,
-/// difficulty, Style menu, Undo (ad), Start over, Settings with sound and freeze, a video
-/// tutorial behind Demo), material sounds, ads every 5th game, the winner's fire and the flight
-/// recorder. The placeholder game: tap the board to knock it, five knocks finish a game.
-/// Replace the board, the rules (src/Core), the tap, the tutorial pages and the clips with the
-/// real game. Tutorial clips: give each a case in PlayClip, then run
-/// addons/renegade_core/tools/Record-Clips.ps1 with their names.
+/// Partnership Spades: you and Max (across) against Rosie and Lena, a game to 500. Bid how many
+/// tricks you'll take (nil for none) with the − and + buttons, then play: tap a card (greyed
+/// cards can't be played). Spades are trump; each trick's winner sweeps it to their pile.
 /// </summary>
-public partial class Main : Node3D
+public partial class Main : CardGame
 {
-	public const string Title = "Game Template";
+	private readonly Dictionary<Card, Card3D> _nodes = new();
+	private SpadesGame _game = new();
+	private SpadesHand? _hand;
+	private readonly SpadesAi[] _ais = new SpadesAi[4];
+	private readonly List<Card3D> _trick = new();
+	private Control _bidBox = null!;
+	private Label _bidLabel = null!;
+	private int _bid = 3;
 
-	/// <summary>Google's test ad units until the real ones exist in AdMob (see the release playbook).</summary>
-	private static readonly AdMobConfig AdUnits = AdMobConfig.Test;
+	protected override string Title => "Spades";
+	protected override string Hint => "Tap a card to play it";
+	protected override int MinPlayers => 4;
+	protected override int MaxPlayers => 4;
+	protected override bool SortYourHand => false;
+	protected override string NewGameText => _game.IsOver ? "New game" : "Next hand";
+	protected override IReadOnlyList<TutorialPage> TutorialPages => Tutorial.Pages;
+	protected override bool InProgress => !_game.IsOver && (_game.Hands > 0 || _hand is { Phase: not SpadesPhase.Over });
 
-	private const float Thickness = 0.4f;
+	protected override void LevelChanged(Difficulty difficulty) => MakeAis(difficulty);
 
-	private readonly ImpactBank<Style> _impacts = new(Styles.Impact);
-	private readonly Scoreboard _wins = new();
-
-	private GameSettings _settings = null!;
-	private Counter _game = new(5);
-	private Node3D _rig = null!;
-	private Camera3D _camera = null!;
-	private MeshInstance3D _board = null!;
-	private SoundPool _sound = null!;
-	private GameHud _hud = null!;
-	private IAdService _ads = null!;
-	private AdSchedule? _adSchedule;
-	private SpinControl _spin = null!;
-	private Flames? _fire;
-
-	private bool _demo;
-	private bool _quitAfterDemo;
-	private string? _clip;
-	private float _demoTimer;
-
-	public override void _Ready()
+	private void MakeAis(Difficulty difficulty)
 	{
-		DevLog.Tag = "gt";
-		AudioWatch.Attach(this, Title);
-		_settings = GameSettings.Load();
-		ReadDeveloperArgs();
-		AudioServer.SetBusMute(0, _settings.Muted);
+		for (int s = 0; s < 4; s++)
+			_ais[s] = new SpadesAi(s, s == 0 ? Difficulty.Medium : difficulty, new Random(Random.Next()));
+	}
 
-		_camera = new Camera3D { Position = new Vector3(0, 10f, 6.5f), Fov = 52, KeepAspect = Camera3D.KeepAspectEnum.Width };
-		AddChild(_camera);
-		_camera.LookAt(new Vector3(0, -0.4f, 0.3f));
-		Stage.Build(this, -Thickness, new Color("1a0f09"));
-		_rig = new Node3D();
-		AddChild(_rig);
-		_board = new MeshInstance3D
+	protected override void AddSettings()
+	{
+		// The bid picker: − [3] + and Bid.
+		_bidBox = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
+		_bidBox.AddThemeConstantOverride("separation", 14);
+		var minus = Widgets.Button("−", 34, Hud.Theme.ButtonDark, Hud.Theme);
+		var plus = Widgets.Button("+", 34, Hud.Theme.ButtonDark, Hud.Theme);
+		minus.CustomMinimumSize = plus.CustomMinimumSize = new Vector2(84, 64);
+		_bidLabel = Widgets.Label("3", 34, Hud.Theme.Text);
+		_bidLabel.CustomMinimumSize = new Vector2(110, 64);
+		var bid = Widgets.Button("Bid", 28, Hud.Theme.Accent, Hud.Theme);
+		bid.CustomMinimumSize = new Vector2(150, 64);
+		minus.Pressed += () => SetBid(_bid - 1);
+		plus.Pressed += () => SetBid(_bid + 1);
+		bid.Pressed += () =>
 		{
-			Mesh = new BoxMesh { Size = new Vector3(7, Thickness, 7) },
-			Position = new Vector3(0, -Thickness / 2, 0),
-			MaterialOverride = Materials.For(Styles.BoardLook(_settings.Board)),
+			if (!Busy && _hand is { Phase: SpadesPhase.Bidding, Current: 0 })
+				Run(PlaceBid(0, _bid));
 		};
-		_rig.AddChild(_board);
-		Stage.WarmUp(this, -Thickness, Sparkle.Halo);
+		_bidBox.AddChild(minus);
+		_bidBox.AddChild(_bidLabel);
+		_bidBox.AddChild(plus);
+		_bidBox.AddChild(bid);
+		Widgets.Anchor(_bidBox, Control.LayoutPreset.CenterBottom, left: -300, right: 300, top: -192, bottom: -128);
+		_bidBox.Visible = false;
+		Hud.AddChild(_bidBox);
+	}
 
-		_sound = new SoundPool();
-		AddChild(_sound);
-		_adSchedule ??= new AdSchedule(_settings.GamesSinceAd);
-		var theme = HudTheme.Warm;
-		_ads = AdServices.Create(this, AdUnits, _demo, new PlaceholderAds { TextColor = theme.Text });
+	private void SetBid(int bid)
+	{
+		_bid = Math.Clamp(bid, 0, 13);
+		_bidLabel.Text = _bid == 0 ? "Nil" : _bid.ToString();
+	}
 
-		_hud = new GameHud(theme);
-		AddChild(_hud);
-		// The HUD saves Sound and Freeze the board itself; add a game's own Settings rows with
-		// _hud.AddToggle and _hud.AddChoice (keep their values in _settings.Extra).
-		_hud.Build(new HudOptions(Title, "Tap the board  ·  Drag sideways to spin"), _settings);
-		_hud.NewGamePressed += OnNewGamePressed;
-		_hud.RestartPressed += OnRestartPressed;
-		_hud.SetTutorial(Tutorial.Pages);
-		_hud.ModeChosen += (mode, difficulty) =>
-		{
-			_settings.Mode = mode;
-			_settings.Difficulty = difficulty;
-			_settings.Save();
-		};
-		_hud.BoardChosen += style =>
-		{
-			_settings.Board = style;
-			_settings.Save();
-			_board.MaterialOverride = Materials.For(Styles.BoardLook(style));
-		};
-		_hud.PiecesChosen += style =>
-		{
-			_settings.Pieces = style;
-			_settings.Save();
-		};
+	protected override async Task NewRound()
+	{
+		int round = Round;
+		_bidBox.Visible = false;
+		if (_game.IsOver)
+			_game = new SpadesGame();
+		MakeAis(Settings.Difficulty);
+		_nodes.Clear();
+		_trick.Clear();
+		_hand = null;
+		SetScore();
+		var order = Deck.Shuffled(Random);
+		var nodes = await ShuffleOnTable(order);
+		if (round != Round)
+			return;
+		for (int i = 0; i < order.Count; i++)
+			_nodes[order[i]] = nodes[i];
+		var hand = new SpadesHand(order, _game.NextDealer);
+		_hand = hand;
+		await DealRound(nodes, Enumerable.Range(0, 52).Select(i => (hand.Dealer + 1 + i) % 4).ToList(), spacing: 0.045f);
+		if (round != Round)
+			return;
+		await PickUpAll(s => hand.Hand(s).Select(c => _nodes[c]));
+		ArrangeBySuit();
+		Hud.SetRestartVisible(true);
+		await NextBid();
+	}
 
-		_spin = new SpinControl(_rig, () => !_settings.FreezeBoard);
-		// Freeze the board also turns it back to where it started.
-		_spin.Frozen = () => _settings.FreezeBoard;
-		_spin.Tapped += OnTapped;
-		RefreshUi();
-		if (_clip != null)
+	private async Task NextBid()
+	{
+		var hand = _hand!;
+		int round = Round;
+		SetScore();
+		if (hand.Phase != SpadesPhase.Bidding)
 		{
-			_hud.Visible = false;
-			_ = PlayClip(_clip);
+			SayNone();
+			await NextTurn();
 			return;
 		}
-		if (!_demo)
-			_hud.OfferTutorialOnce(_settings);
-		_hud.ApplyDevFlags();
-	}
-
-	public override void _UnhandledInput(InputEvent @event)
-	{
-		if (!_hud.MenuOpen)
-			_spin.HandleInput(@event);
-	}
-
-	/// <summary>A tap on the board: a knock in the board's material, sparks on the last one.</summary>
-	private void OnTapped(Vector2 screen)
-	{
-		if (_game.IsDone)
-			return;
-		var from = _camera.ProjectRayOrigin(screen);
-		var direction = _camera.ProjectRayNormal(screen);
-		if (direction.Y > -0.01f)
-			return;
-		var hit = from + direction * (-from.Y / direction.Y);
-		var local = _rig.ToLocal(hit);
-		if (Mathf.Abs(local.X) > 3.5f || Mathf.Abs(local.Z) > 3.5f)
-			return;
-		_hud.HideHint();
-		_game.Tap();
-		_sound.PlayImpact(_impacts.Random(_settings.Board), hit, 1f, Styles.GainDb(_settings.Board));
-		if (_game.IsDone)
+		if (hand.Current == 0 && !Demo)
 		{
-			_wins.Win(first: true);
-			Sparkle.Burst(_rig, local + new Vector3(0, 0.3f, 0));
-			// The winner's fire: in a real game, set the winning pieces alight.
-			_fire = Flames.SetAlight(_rig, local, new[] { _board }, radius: 0.6f, size: 1.4f, withLight: true);
+			// Start the picker at what a sensible player would bid.
+			SetBid(new SpadesAi(0, Difficulty.Medium, Random).ChooseBid(hand));
+			_bidBox.Visible = true;
+			Busy = false;
+			int partner = hand.Bid(2) is { } b ? b : -1;
+			Hud.SetStatus(partner >= 0 ? $"Your bid. Max bid {(partner == 0 ? "nil" : partner.ToString())}." : "Your bid: how many tricks will you take?", Bright);
+			return;
 		}
-		RefreshUi();
+		Busy = true;
+		await Pause(0.7f);
+		if (round != Round)
+			return;
+		await PlaceBid(hand.Current, _ais[hand.Current].ChooseBid(hand));
 	}
 
-	private void OnNewGamePressed()
+	private async Task PlaceBid(int seat, int bid)
 	{
-		bool adDue = _adSchedule!.GameFinished();
-		_settings.GamesSinceAd = _adSchedule.GamesSinceAd;
-		_settings.Save();
-		if (adDue)
+		var hand = _hand!;
+		Busy = true;
+		_bidBox.Visible = false;
+		hand.PlaceBid(bid);
+		Say(seat, bid == 0 ? "Nil!" : $"{bid}");
+		Hud.SetStatus(seat == 0 ? $"You bid {(bid == 0 ? "nil" : bid.ToString())}." : $"{Names[seat]} bids {(bid == 0 ? "nil" : bid.ToString())}.", Muted);
+		await Pause(0.6f);
+		await NextBid();
+	}
+
+	private async Task NextTurn()
+	{
+		var hand = _hand!;
+		int round = Round;
+		SetScore();
+		if (hand.Phase == SpadesPhase.Over)
 		{
-			DevLog.Write("ad: between-games interstitial");
-			_ads.ShowInterstitial(StartGame);
+			EndHand();
+			return;
+		}
+		int seat = hand.Current;
+		if (seat == 0 && !Demo)
+		{
+			DimUnplayable(hand.Legal());
+			Busy = false;
+			Hud.SetStatus(hand.Trick.Count == 0 ? "Your lead: tap a card." : "Your turn: tap a card to play.", Bright);
+			return;
+		}
+		Busy = true;
+		var copy = hand.Clone();
+		var ai = _ais[seat];
+		var think = Task.Run(() => ai.ChoosePlay(copy));
+		await Pause(0.45f);
+		var card = await think;
+		if (round != Round)
+			return;
+		await Play(seat, card);
+	}
+
+	private async Task Play(int seat, Card card)
+	{
+		var hand = _hand!;
+		Busy = true;
+		DimUnplayable(null);
+		bool breaks = card.Suit == Suit.Spades && !hand.SpadesBroken;
+		var won = hand.PlayCard(card);
+		var node = _nodes[card];
+		_trick.Add(node);
+		await PlayToTrick(seat, node);
+		if (seat == 0)
+			ArrangeBySuit();
+		if (breaks)
+			Hud.SetStatus("Spades are broken!", Bright);
+		if (won != null)
+		{
+			await Pause(0.65f);
+			bool ours = SpadesHand.Team(won.Winner) == 0;
+			Hud.SetStatus(won.Winner == 0 ? "You take the trick." : $"{Names[won.Winner]} takes the trick.", ours ? Bright : Muted);
+			await SweepTrick(won.Winner, _trick.ToList(), hand.TricksWon(won.Winner) - 1);
+			_trick.Clear();
+		}
+		await NextTurn();
+	}
+
+	private void EndHand()
+	{
+		var hand = _hand!;
+		var (us, them) = _game.Record(hand);
+		SetScore();
+		string Side(TeamScore s, string who) =>
+			s.Bid == 0 ? "" : s.Made ? $"{who} made {s.Bid} ({s.Tricks} tricks): {s.Points:+#;-#;0}." : $"{who} set! {s.Tricks} of {s.Bid}: {s.Points:+#;-#;0}.";
+		string nils = string.Join(" ", us.Nils.Concat(them.Nils).Select(n => $"{(n.Seat == 0 ? "Your" : Names[n.Seat] + "'s")} nil {(n.Made ? "made" : "failed")}."));
+		string summary = $"{Side(us, "You and Max")} {Side(them, "Rosie and Lena")} {nils}".Trim();
+		if (_game.IsOver)
+		{
+			int w = _game.Winner;
+			Sparkle.Burst(this, Table.Winnings[w == 0 ? 0 : 1] + Vector3.Up * 0.3f);
+			Finish($"{summary} {(w == 0 ? "You and Max win" : "Rosie and Lena win")}, {_game.Scores[w]} to {_game.Scores[1 - w]}!",
+				w == 0 ? 0 : 1, null);
 		}
 		else
 		{
-			StartGame();
+			Finish(summary, -1);
 		}
 	}
 
-	private void StartGame()
+	private void SetScore()
 	{
-		_fire?.Extinguish();
-		_fire = null;
-		_board.MaterialOverlay = null;
-		_game = new Counter(5);
-		RefreshUi();
+		var hand = _hand;
+		string tricks = hand is { Phase: SpadesPhase.Playing or SpadesPhase.Over } ? $" · Tricks {hand.TeamTricks(0)}/{hand.TeamBid(0)}–{hand.TeamTricks(1)}/{hand.TeamBid(1)}" : "";
+		Hud.SetScore($"Us {_game.Scores[0]} · Them {_game.Scores[1]} · Bags {_game.Bags[0]}–{_game.Bags[1]}{tricks}");
 	}
 
-	/// <summary>
-	/// Start over mid-game. Against the computer it counts as resigning (a loss) unless the player
-	/// watches an ad; between two players it just asks first.
-	/// </summary>
-	private void OnRestartPressed()
+	protected override void Tapped(Vector3 origin, Vector3 direction, Vector2 screen)
 	{
-		if (_game.IsDone || _game.Count == 0)
+		if (_hand is not { Phase: SpadesPhase.Playing, Current: 0 } hand || Fans[0].At(origin, direction) is not { } card)
+			return;
+		if (!hand.Legal().Contains(card.Card))
 		{
-			StartGame();
+			Hud.SetStatus(hand.Trick.Count > 0 ? "You must follow suit." : "Spades aren't broken yet: lead another suit.", Bright);
 			return;
 		}
-		_hud.AskRestart(_settings.Mode == GameMode.PlayerVsComputer && !_demo, countLoss =>
-		{
-			if (countLoss)
-				_wins.Win(first: false);
-			StartGame();
-		}, then => _ads.ShowRewarded(rewarded: then, closed: () => { }));
-	}
-
-	/// <summary>
-	/// Plays one scripted scene for the tutorial (with --clip=name), then quits; the HUD is hidden
-	/// so the clip shows only the board. Record them with addons/renegade_core/tools/Record-Clips.ps1.
-	/// </summary>
-	private async System.Threading.Tasks.Task PlayClip(string clip)
-	{
-		_settings.Muted = false;
-		await ToSignal(GetTree().CreateTimer(0.8), SceneTreeTimer.SignalName.Timeout);
-		switch (clip)
-		{
-			default:
-				for (int i = 0; i < 5; i++)
-				{
-					OnTapped(GetViewport().GetVisibleRect().Size / 2);
-					await ToSignal(GetTree().CreateTimer(0.6), SceneTreeTimer.SignalName.Timeout);
-				}
-				break;
-		}
-		await ToSignal(GetTree().CreateTimer(2.0), SceneTreeTimer.SignalName.Timeout);
-		GetTree().Quit();
-	}
-
-	private void RefreshUi()
-	{
-		_hud.SetScore($"Games {_wins.First}");
-		_hud.SetNewGameVisible(_game.IsDone);
-		_hud.SetRestartVisible(!_game.IsDone);
-		_hud.SetStatus(_game.IsDone ? "Done!" : $"Knock {_game.Count} of {_game.Target}", new Color("fff3e0"));
-		if (_game.IsDone && _demo && _quitAfterDemo && _wins.First >= 5)
-			GetTree().Quit();
-	}
-
-	public override void _Process(double delta)
-	{
-		float dt = (float)delta;
-		_spin.Process(dt);
-		if (!_demo)
-			return;
-		_demoTimer += dt;
-		if (_demoTimer < 0.3f)
-			return;
-		_demoTimer = 0f;
-		if (_game.IsDone)
-			OnNewGamePressed();
-		else
-			OnTapped(GetViewport().GetVisibleRect().Size / 2);
-	}
-
-	/// <summary>
-	/// Developer flags after `--` (or in user://dev_args.txt on a phone): `--log`, `--demo`,
-	/// `--quit-after-demo`, `--games-since-ad=4`, `--clip=knock` (plays a tutorial clip and quits),
-	/// plus the HUD's `--tutorial=N` and `--settings`. Add the game's own flags here.
-	/// </summary>
-	private void ReadDeveloperArgs()
-	{
-		foreach (var (name, value) in DevArgs.Read())
-		{
-			switch (name)
-			{
-				case "--log":
-					DevLog.Enabled = true;
-					break;
-				case "--demo":
-					_demo = true;
-					_settings.Muted = false;
-					break;
-				case "--quit-after-demo":
-					_quitAfterDemo = true;
-					break;
-				case "--games-since-ad":
-					_adSchedule = new AdSchedule(int.Parse(value));
-					break;
-				case "--clip":
-					_clip = value;
-					break;
-			}
-		}
+		Hud.HideHint();
+		Run(Play(0, card.Card));
 	}
 }

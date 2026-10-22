@@ -1,21 +1,20 @@
 using System.Collections.Generic;
 using Renegade.Ui;
 
-namespace GameTemplate.Game;
+namespace Spades.Game;
 
-/// <summary>
-/// The guided tour behind the Demo button: a few short pages, each with a looping clip recorded
-/// from the game itself (see Main.PlayClip and addons/renegade_core/tools/Record-Clips.ps1).
-/// Text only, no voice. A page without a clip (Video = null) just shows its text.
-/// </summary>
+/// <summary>The guided tour behind the Demo button: a few short pages.</summary>
 public static class Tutorial
 {
 	public static readonly IReadOnlyList<TutorialPage> Pages = new[]
 	{
-		new TutorialPage("Knock five times",
-			"Tap the board to knock on it. Five knocks finish a game, and the board catches fire. Replace this page with the real game's rules.",
-			"res://tutorial/knock.ogv"),
-		new TutorialPage("Tips",
-			"Drag sideways to spin the board, or freeze it in Settings."),
+		new TutorialPage("Partners",
+			"You play with Max, across the table, against Rosie and Lena. Your side tries to take at least as many tricks as you both bid."),
+		new TutorialPage("Bid",
+			"Use − and + to choose how many tricks you think you'll take (the picker starts at a sensible bid), then press Bid. Nil means you'll take none: 100 points if you manage it, minus 100 if not."),
+		new TutorialPage("Play",
+			"Follow suit if you can. Spades are trump: any spade beats any other suit. Spades can't be led until one has been played."),
+		new TutorialPage("Scoring",
+			"Make your bid for ten points a trick, plus one for each extra trick (a bag). Fall short and you lose ten a trick. Every ten bags costs 100, so don't take too many! First side to 500 wins."),
 	};
 }
