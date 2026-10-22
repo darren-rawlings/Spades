@@ -36,7 +36,20 @@ public partial class Main : CardGame
 	protected override IReadOnlyList<TutorialPage> TutorialPages => Tutorial.Pages;
 	protected override bool InProgress => !_game.IsOver && (_game.Hands > 0 || _hand is { Phase: not SpadesPhase.Over });
 
+	/// <summary>Which cards rank above the ace of spades (Settings › High cards).</summary>
+	private HighCards High => Saved("high", HighCards.Standard);
+
+	/// <summary>The score a game is played to (Settings › Play to).</summary>
+	private int Target => Settings.Extra.TryGetValue("target", out var t) && int.TryParse(t, out int n) && n > 0 ? n : 500;
+
 	protected override void LevelChanged(Difficulty difficulty) => MakeAis(difficulty);
+
+	/// <summary>`--high=Jokers` (or DeuceHigh, BigDeuce) plays a house rule, for checks.</summary>
+	protected override void DevArg(string name, string value)
+	{
+		if (name == "--high" && Enum.TryParse<HighCards>(value, out var high))
+			Settings.Extra["high"] = high.ToString();
+	}
 
 	private void MakeAis(Difficulty difficulty)
 	{
@@ -46,6 +59,26 @@ public partial class Main : CardGame
 
 	protected override void AddSettings()
 	{
+		var targets = new[] { 250, 300, 500 };
+		Hud.AddChoice("Play to", targets.Select(t => t.ToString()).ToArray(), Math.Max(0, Array.IndexOf(targets, Target)), choice =>
+		{
+			Settings.Extra["target"] = targets[choice].ToString();
+			Settings.Save();
+			if (!InProgress)
+				Run(StartRound());
+		});
+		Hud.AddChoice("High cards", new[] { "Ace of spades", "Deuce of spades", "Big deuce (2♦ 2♠)", "Jokers" }, (int)High, choice =>
+		{
+			Save("high", (HighCards)choice);
+			if (!InProgress)
+				Run(StartRound());
+		});
+		Hud.AddToggle("Ten bags cost 100", Flag("bags", true), on =>
+		{
+			SetFlag("bags", on);
+			if (!InProgress)
+				Run(StartRound());
+		});
 		// The bid picker: − [3] + and Bid.
 		_bidBox = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
 		_bidBox.AddThemeConstantOverride("separation", 14);
@@ -82,26 +115,26 @@ public partial class Main : CardGame
 	{
 		int round = Round;
 		_bidBox.Visible = false;
-		if (_game.IsOver)
-			_game = new SpadesGame();
+		if (_game.IsOver || _game.Hands == 0)
+			_game = new SpadesGame(Target, Flag("bags", true));
 		MakeAis(Settings.Difficulty);
 		_nodes.Clear();
 		_trick.Clear();
 		_hand = null;
 		SetScore();
-		var order = Deck.Shuffled(Random);
+		var order = SpadesHand.Pack(High, Random);
 		var nodes = await ShuffleOnTable(order);
 		if (round != Round)
 			return;
 		for (int i = 0; i < order.Count; i++)
 			_nodes[order[i]] = nodes[i];
-		var hand = new SpadesHand(order, _game.NextDealer);
+		var hand = new SpadesHand(order, _game.NextDealer, High);
 		_hand = hand;
 		await DealRound(nodes, Enumerable.Range(0, 52).Select(i => (hand.Dealer + 1 + i) % 4).ToList(), spacing: 0.045f);
 		if (round != Round)
 			return;
 		await PickUpAll(s => hand.Hand(s).Select(c => _nodes[c]));
-		ArrangeBySuit();
+		ArrangeSpades();
 		Hud.SetRestartVisible(true);
 		await NextBid();
 	}
@@ -140,7 +173,7 @@ public partial class Main : CardGame
 		Busy = true;
 		_bidBox.Visible = false;
 		hand.PlaceBid(bid);
-		Say(seat, bid == 0 ? "Nil!" : $"{bid}");
+		Say(seat, bid == 0 ? "Nil!" : $"I bid {bid}.");
 		Hud.SetStatus(seat == 0 ? $"You bid {(bid == 0 ? "nil" : bid.ToString())}." : $"{Names[seat]} bids {(bid == 0 ? "nil" : bid.ToString())}.", Muted);
 		await Pause(0.6f);
 		await NextBid();
@@ -186,7 +219,7 @@ public partial class Main : CardGame
 		_trick.Add(node);
 		await PlayToTrick(seat, node);
 		if (seat == 0)
-			ArrangeBySuit();
+			ArrangeSpades();
 		if (breaks)
 			Hud.SetStatus("Spades are broken!", Bright);
 		if (won != null)
@@ -194,7 +227,12 @@ public partial class Main : CardGame
 			await Pause(0.65f);
 			bool ours = SpadesHand.Team(won.Winner) == 0;
 			Hud.SetStatus(won.Winner == 0 ? "You take the trick." : $"{Names[won.Winner]} takes the trick.", ours ? Bright : Muted);
-			await SweepTrick(won.Winner, _trick.ToList(), hand.TricksWon(won.Winner) - 1);
+			TrickNews(won.Cards, won.Winner);
+			// One pile a side: Max collects yours, Rosie (on your left) theirs.
+			int team = SpadesHand.Team(won.Winner);
+			int collector = team == 0 ? 2 : 1;
+			int taken = Enumerable.Range(0, 4).Where(s => SpadesHand.Team(s) == team).Sum(hand.TricksWon) - 1;
+			await SweepTrick(collector, _trick.ToList(), taken);
 			_trick.Clear();
 		}
 		await NextTurn();
@@ -209,6 +247,9 @@ public partial class Main : CardGame
 			s.Bid == 0 ? "" : s.Made ? $"{who} made {s.Bid} ({s.Tricks} tricks): {s.Points:+#;-#;0}." : $"{who} set! {s.Tricks} of {s.Bid}: {s.Points:+#;-#;0}.";
 		string nils = string.Join(" ", us.Nils.Concat(them.Nils).Select(n => $"{(n.Seat == 0 ? "Your" : Names[n.Seat] + "'s")} nil {(n.Made ? "made" : "failed")}."));
 		string summary = $"{Side(us, "You and Max")} {Side(them, "Rosie and Lena")} {nils}".Trim();
+		News(summary);
+		if (_game.BagRule)
+			News($"Bags: you and Max {_game.Bags[0]}, Rosie and Lena {_game.Bags[1]} (ten cost 100).");
 		if (_game.IsOver)
 		{
 			int w = _game.Winner;
@@ -224,9 +265,26 @@ public partial class Main : CardGame
 
 	private void SetScore()
 	{
-		var hand = _hand;
-		string tricks = hand is { Phase: SpadesPhase.Playing or SpadesPhase.Over } ? $" · Tricks {hand.TeamTricks(0)}/{hand.TeamBid(0)}–{hand.TeamTricks(1)}/{hand.TeamBid(1)}" : "";
-		Hud.SetScore($"Us {_game.Scores[0]} · Them {_game.Scores[1]} · Bags {_game.Bags[0]}–{_game.Bags[1]}{tricks}");
+		// Each side's total, then this hand: what it bid and what it has taken so far.
+		string Side(string who, int team)
+		{
+			if (_hand is not { } hand)
+				return $"{who} {_game.Scores[team]}";
+			bool bid = hand.Bid(team) != null && hand.Bid(team + 2) != null;
+			return $"{who} {_game.Scores[team]}: bid {(bid ? hand.TeamBid(team).ToString() : "–")}, took {hand.TeamTricks(team)}";
+		}
+		Hud.SetScore($"{Side("Us", 0)}  ·  {Side("Them", 1)}");
+	}
+
+	/// <summary>Keeps your fan in Spades order: spades first (house-rule cards at the top), then the other suits, high to low.</summary>
+	private void ArrangeSpades()
+	{
+		if (_hand is not { } hand)
+			return;
+		Suit[] order = { Suit.Spades, Suit.Hearts, Suit.Clubs, Suit.Diamonds };
+		var sorted = Fans[0].Cards.OrderBy(n => Array.IndexOf(order, hand.SuitOf(n.Card))).ThenByDescending(n => hand.Power(n.Card)).ToList();
+		Fans[0].Reorder(sorted);
+		Fans[0].Settle(0.18f);
 	}
 
 	protected override void Tapped(Vector3 origin, Vector3 direction, Vector2 screen)

@@ -20,3 +20,16 @@ guessed deals; runs on a background thread).
 
 ## Scope for version 1
 Everything above. Later: blind nil, tutorial clips, choosing your partner's seat.
+
+## House rules and options (Darren's notes, 2026-10-22)
+- **Play to:** 250, 300 or 500 (the default).
+- **High cards:** the ace of spades is highest (standard); the deuce of spades above the ace;
+  "big deuce", where the two of diamonds counts as a spade and ranks above the two of spades; or
+  jokers, where the two of clubs and the two of hearts leave the deck and the big and little
+  jokers come in (big joker, little joker, two of diamonds, two of spades, then the ace, all
+  spades). The jokers are drawn by the card kit.
+- **Ten bags cost 100:** on by default; it can be turned off.
+- Each side has one trick pile: Max collects yours, Rosie (on your left) theirs.
+- The score line: each side's total, then this hand's bid and tricks taken.
+- Every finished trick is written to the log at the top, card by card, so any hand can be
+  checked afterwards (and the rules code is tested to make every player follow suit).

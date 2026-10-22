@@ -7,6 +7,15 @@ namespace Spades.Core;
 
 public enum SpadesPhase { Bidding, Playing, Over }
 
+/// <summary>
+/// Which cards rank above the ace of spades (house rules): none; the two of spades ("deuce high");
+/// the two of diamonds, then the two of spades ("big deuce", the two of diamonds counting as a
+/// spade); or two jokers above those (the two of clubs and two of hearts leave the deck, the big
+/// and little jokers come in; big joker, little joker, two of diamonds, two of spades, then the
+/// ace, all of them spades).
+/// </summary>
+public enum HighCards { Standard, DeuceHigh, BigDeuce, Jokers }
+
 /// <summary>A trick that's been won: who took it and the cards.</summary>
 public sealed record TrickWon(int Winner, IReadOnlyList<Play> Cards);
 
@@ -32,11 +41,12 @@ public sealed class SpadesHand
 	private readonly int[] _tricks = new int[Seats];
 	private readonly HashSet<Suit>[] _void = Enumerable.Range(0, Seats).Select(_ => new HashSet<Suit>()).ToArray();
 
-	public SpadesHand(IReadOnlyList<Card> deck, int dealer)
+	public SpadesHand(IReadOnlyList<Card> deck, int dealer, HighCards high = HighCards.Standard)
 	{
 		if (deck.Count != 52 || deck.Distinct().Count() != 52)
 			throw new ArgumentException("Spades needs a full deck.", nameof(deck));
 		Dealer = dealer;
+		High = high;
 		_hands = Tricks.Deal(deck, Seats, first: (dealer + 1) % Seats);
 		Current = (dealer + 1) % Seats;
 	}
@@ -44,6 +54,7 @@ public sealed class SpadesHand
 	private SpadesHand(SpadesHand other, List<Card>[] hands)
 	{
 		Dealer = other.Dealer;
+		High = other.High;
 		_hands = hands;
 		Phase = other.Phase;
 		Current = other.Current;
@@ -58,6 +69,7 @@ public sealed class SpadesHand
 	}
 
 	public int Dealer { get; }
+	public HighCards High { get; }
 	public SpadesPhase Phase { get; private set; } = SpadesPhase.Bidding;
 	public int Current { get; private set; }
 	public bool SpadesBroken { get; private set; }
@@ -95,6 +107,53 @@ public sealed class SpadesHand
 		}
 	}
 
+	/// <summary>The suit a card plays as: jokers, and the two of diamonds under the big-deuce rules, are spades.</summary>
+	public Suit SuitOf(Card card) => card.IsJoker || (High is HighCards.BigDeuce or HighCards.Jokers && card == Two(Suit.Diamonds)) ? Suit.Spades : card.Suit;
+
+	/// <summary>How strong a card is within its suit: two low, ace 14, then any house-rule cards above the ace of spades.</summary>
+	public int Power(Card card)
+	{
+		if (card.Rank == Card.BigJoker)
+			return 18;
+		if (card.Rank == Card.LittleJoker)
+			return 17;
+		if (High is HighCards.BigDeuce or HighCards.Jokers && card == Two(Suit.Diamonds))
+			return 16;
+		if (High != HighCards.Standard && card == Two(Suit.Spades))
+			return 15;
+		return Tricks.Value(card);
+	}
+
+	/// <summary>Who wins a trick: the strongest spade played, or else the strongest card of the suit led.</summary>
+	public Play Winner(IReadOnlyList<Play> trick)
+	{
+		var best = trick[0];
+		foreach (var play in trick.Skip(1))
+		{
+			bool beats = SuitOf(play.Card) == SuitOf(best.Card) ? Power(play.Card) > Power(best.Card) : SuitOf(play.Card) == Suit.Spades;
+			if (beats)
+				best = play;
+		}
+		return best;
+	}
+
+	private static Card Two(Suit suit) => new(2, suit);
+
+	/// <summary>The cards for a deal under these rules, shuffled: the jokers rules swap the two of clubs and the two of hearts for the jokers.</summary>
+	public static List<Card> Pack(HighCards high, Random random)
+	{
+		var cards = Deck.Standard();
+		if (high == HighCards.Jokers)
+		{
+			cards.Remove(Two(Suit.Clubs));
+			cards.Remove(Two(Suit.Hearts));
+			cards.Add(Card.Joker(big: true));
+			cards.Add(Card.Joker(big: false));
+		}
+		Deck.Shuffle(cards, random);
+		return cards;
+	}
+
 	public List<Card> Legal() => Legal(Current);
 
 	public List<Card> Legal(int seat)
@@ -102,11 +161,12 @@ public sealed class SpadesHand
 		var hand = _hands[seat];
 		if (_trick.Count == 0)
 		{
-			if (!SpadesBroken && hand.Any(c => c.Suit != Suit.Spades))
-				return hand.Where(c => c.Suit != Suit.Spades).ToList();
+			if (!SpadesBroken && hand.Any(c => SuitOf(c) != Suit.Spades))
+				return hand.Where(c => SuitOf(c) != Suit.Spades).ToList();
 			return hand.ToList();
 		}
-		return Tricks.Following(hand, _trick[0].Card.Suit);
+		var led = SuitOf(_trick[0].Card);
+		return hand.Any(c => SuitOf(c) == led) ? hand.Where(c => SuitOf(c) == led).ToList() : hand.ToList();
 	}
 
 	public TrickWon? PlayCard(Card card)
@@ -115,19 +175,19 @@ public sealed class SpadesHand
 			throw new InvalidOperationException("Not playing now.");
 		if (!Legal().Contains(card))
 			throw new InvalidOperationException($"You can't play {card} now.");
-		if (_trick.Count > 0 && card.Suit != _trick[0].Card.Suit)
-			_void[Current].Add(_trick[0].Card.Suit);
+		if (_trick.Count > 0 && SuitOf(card) != SuitOf(_trick[0].Card))
+			_void[Current].Add(SuitOf(_trick[0].Card));
 		_hands[Current].Remove(card);
 		_trick.Add(new Play(Current, card));
 		_played.Add(card);
-		if (card.Suit == Suit.Spades)
+		if (SuitOf(card) == Suit.Spades)
 			SpadesBroken = true;
 		if (_trick.Count < Seats)
 		{
 			Current = (Current + 1) % Seats;
 			return null;
 		}
-		int winner = Tricks.Winner(_trick, Suit.Spades).Seat;
+		int winner = Winner(_trick).Seat;
 		var won = new TrickWon(winner, _trick.ToList());
 		_tricks[winner]++;
 		_trick.Clear();
@@ -181,7 +241,7 @@ public sealed class SpadesHand
 			bool ok = true;
 			foreach (int s in Enumerable.Range(0, Seats).Where(s => s != seat).OrderByDescending(s => _void[s].Count))
 			{
-				var fits = pool.Where(c => !_void[s].Contains(c.Suit)).Take(_hands[s].Count).ToList();
+				var fits = pool.Where(c => !_void[s].Contains(SuitOf(c))).Take(_hands[s].Count).ToList();
 				if (fits.Count < _hands[s].Count)
 				{
 					ok = false;
@@ -198,10 +258,24 @@ public sealed class SpadesHand
 	}
 }
 
-/// <summary>A game of Spades to 500: every ten bags a side collects costs it 100.</summary>
+/// <summary>
+/// A game of Spades to 500 (or another target): every ten bags a side collects costs it 100,
+/// unless that rule is turned off.
+/// </summary>
 public sealed class SpadesGame
 {
-	public const int Target = 500, BagLimit = 10, BagPenalty = 100;
+	public const int BagLimit = 10, BagPenalty = 100;
+
+	public SpadesGame(int target = 500, bool bagPenalty = true)
+	{
+		Target = target;
+		BagRule = bagPenalty;
+	}
+
+	public int Target { get; }
+
+	/// <summary>Whether ten bags cost a hundred points.</summary>
+	public bool BagRule { get; }
 
 	public int[] Scores { get; } = new int[2];
 	public int[] Bags { get; } = new int[2];
@@ -218,7 +292,7 @@ public sealed class SpadesGame
 		{
 			Scores[team] += score.Points;
 			Bags[team] += score.Bags;
-			while (Bags[team] >= BagLimit)
+			while (BagRule && Bags[team] >= BagLimit)
 			{
 				Bags[team] -= BagLimit;
 				Scores[team] -= BagPenalty;
