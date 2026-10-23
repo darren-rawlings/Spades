@@ -162,7 +162,7 @@ public partial class Main : CardGame
 			return;
 		}
 		Busy = true;
-		Hud.SetStatus($"{Names[hand.Current]} is bidding.", Muted);
+		Hud.SetStatus(hand.Current == 0 ? "Your bid." : $"{Names[hand.Current]} is bidding.", Muted);
 		await Pause(0.7f);
 		if (round != Round)
 			return;
@@ -200,7 +200,7 @@ public partial class Main : CardGame
 			return;
 		}
 		Busy = true;
-		Hud.SetStatus($"{Names[seat]}'s turn.", Muted);
+		Hud.SetStatus(seat == 0 ? "Your turn." : $"{Names[seat]}'s turn.", Muted);
 		var copy = hand.Clone();
 		var ai = _ais[seat];
 		var think = Task.Run(() => ai.ChoosePlay(copy));
