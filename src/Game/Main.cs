@@ -150,6 +150,7 @@ public partial class Main : CardGame
 			await NextTurn();
 			return;
 		}
+		ShowTurn(hand.Current);
 		if (hand.Current == 0 && !Demo)
 		{
 			// Start the picker at what a sensible player would bid.
@@ -161,6 +162,7 @@ public partial class Main : CardGame
 			return;
 		}
 		Busy = true;
+		Hud.SetStatus($"{Names[hand.Current]} is bidding.", Muted);
 		await Pause(0.7f);
 		if (round != Round)
 			return;
@@ -174,7 +176,6 @@ public partial class Main : CardGame
 		_bidBox.Visible = false;
 		hand.PlaceBid(bid);
 		Say(seat, bid == 0 ? "Nil!" : $"I bid {bid}.");
-		Hud.SetStatus(seat == 0 ? $"You bid {(bid == 0 ? "nil" : bid.ToString())}." : $"{Names[seat]} bids {(bid == 0 ? "nil" : bid.ToString())}.", Muted);
 		await Pause(0.6f);
 		await NextBid();
 	}
@@ -190,6 +191,7 @@ public partial class Main : CardGame
 			return;
 		}
 		int seat = hand.Current;
+		ShowTurn(seat);
 		if (seat == 0 && !Demo)
 		{
 			DimUnplayable(hand.Legal());
@@ -198,6 +200,7 @@ public partial class Main : CardGame
 			return;
 		}
 		Busy = true;
+		Hud.SetStatus($"{Names[seat]}'s turn.", Muted);
 		var copy = hand.Clone();
 		var ai = _ais[seat];
 		var think = Task.Run(() => ai.ChoosePlay(copy));
@@ -221,12 +224,11 @@ public partial class Main : CardGame
 		if (seat == 0)
 			ArrangeSpades();
 		if (breaks)
-			Hud.SetStatus("Spades are broken!", Bright);
+			News("Spades are broken!");
 		if (won != null)
 		{
 			await Pause(0.65f);
 			bool ours = SpadesHand.Team(won.Winner) == 0;
-			Hud.SetStatus(won.Winner == 0 ? "You take the trick." : $"{Names[won.Winner]} takes the trick.", ours ? Bright : Muted);
 			TrickNews(won.Cards, won.Winner);
 			// One pile a side: Max collects yours, Rosie (on your left) theirs.
 			int team = SpadesHand.Team(won.Winner);
