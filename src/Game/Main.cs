@@ -141,6 +141,7 @@ public partial class Main : CardGame
 
 	private async Task NextBid()
 	{
+		ClipMoment("bid", 9, log: true);
 		var hand = _hand!;
 		int round = Round;
 		SetScore();
@@ -213,6 +214,7 @@ public partial class Main : CardGame
 
 	private async Task Play(int seat, Card card)
 	{
+		ClipMoment("trick", 7);
 		var hand = _hand!;
 		Busy = true;
 		DimUnplayable(null);
@@ -242,6 +244,7 @@ public partial class Main : CardGame
 
 	private void EndHand()
 	{
+		ClipMoment("result", 6);
 		var hand = _hand!;
 		var (us, them) = _game.Record(hand);
 		SetScore();
