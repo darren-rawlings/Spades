@@ -257,7 +257,7 @@ public partial class Main : CardGame
 			int w = _game.Winner;
 			Sparkle.Burst(this, Table.Winnings[w == 0 ? 0 : 1] + Vector3.Up * 0.3f);
 			Finish($"{summary} {(w == 0 ? "You and Max win" : "Rosie and Lena win")}, {_game.Scores[w]} to {_game.Scores[1 - w]}!",
-				w == 0 ? 0 : 1, null);
+				w == 0 ? 0 : 1, null, winningSeats: w == 0 ? new[] { 0, 2 } : new[] { 1, 3 });
 		}
 		else
 		{
